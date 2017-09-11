@@ -1,0 +1,1 @@
+<put-your-hostname-here> ansible_ssh_host=<put-your-ip-here>  ansible_ssh_port=22

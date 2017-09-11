@@ -1,0 +1,19 @@
+#
+#  open: unlock and mount an encrypted LUKS volume 
+#  close: unmount and lock an encrypted LUKS volume 
+#
+---
+- name: "Encrypted LUKS volume: {{ action }} {{ mountpoint }}"
+  no_log: True
+  #become: True
+  
+  mod-luks:
+    action: "{{ action }}" 
+    mountpoint: "{{ mountpoint }}"
+    uuid: "{{ uuid | default('') }}"
+    password: "{{ password | default('') }}"
+    verbose: "{{ verbose | default('') }}"
+  
+  register: luks_result
+  
+- debug: "var=luks_result" 

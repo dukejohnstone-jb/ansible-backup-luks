@@ -1,0 +1,10 @@
+# This should be an encrypted Ansible Vault file containing information as below
+
+disks:
+  my_disk_1:
+    uuid: 1234-5678-abcd
+    password: DJRFJTT$(%TRJFJFMM  
+
+  my_disk_2:
+    uuid: abcd-5678-1234
+    password: HKHKRFJ^(^*$*#*MCN

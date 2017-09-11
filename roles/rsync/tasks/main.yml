@@ -1,0 +1,17 @@
+#
+# rsync "src" into "dest"
+#
+---
+- name: "rsync two directories: '{{ src }}' -> '{{ dest }}'"
+  no_log: True
+  #become: True
+    
+  mod-rsync:
+    options: "{{ options }}" 
+    src: "{{ src }}"
+    dest: "{{ dest }}"
+    verbose: "{{ verbose | default('') }}"
+  
+  register: rsync_result
+  
+- debug: "var=rsync_result" 

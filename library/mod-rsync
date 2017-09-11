@@ -1,0 +1,162 @@
+#!/bin/bash
+#
+#  Use rsync to copy data between the given directories.
+#
+#  Parameters:
+#    options: list of options; typically "-a -v -z --delete"
+#    verbose: true/yes; anything else is false
+#    src: source directory
+#    dest: destination directory
+# 
+#  Why a module when "command" would do? Because I want to 
+#  check and disallow directory paths with trailing slashes.
+#  It really drives me nuts (and has cost me over the years
+#  thanks to my fat fingers).
+#
+###############################################################################
+# Constants
+###############################################################################
+
+# tags for input parameters
+declare -r TAG_OPTIONS="options"
+declare -r TAG_SRC="src" 
+declare -r TAG_DEST="dest"
+declare -r TAG_VERBOSE="verbose"
+
+# values for the "verbose" parameter
+declare -r VERBOSE_ON="true"
+declare -r VERBOSE_YES="yes"
+
+# exit codes
+declare -r ERR_PARAM=1
+declare -r ERR_RSYNC=2
+
+# Ansible variables
+CHANGED="false"
+FAILED="false"
+
+# other
+NAMETAG="Mod_Rsync"
+VERSION="Ver 1.0 22nd March 2017"
+LOGMSG=""
+
+###############################################################################
+#
+# Function LOGMSG
+#
+# Append a message to previous messages.
+#
+# Parameters: 
+# 1 - message
+#
+###############################################################################
+function logmsg() 
+{
+    LOGMSG="${LOGMSG}\n${1}"
+}
+
+###############################################################################
+#
+# Function STOP
+#
+# Terminates the script and generates a message for Ansible.
+#
+# Parameters:
+#  1 - exit code
+#  2 - message
+#
+###############################################################################
+function stop()
+{
+    local MSG="${NAMETAG} : Exit code: ${1} - ${2}"
+
+    if [ "${PARAM_VERBOSE}" = "${VERBOSE_ON}" ] ||
+       [ "${PARAM_VERBOSE}" = "${VERBOSE_YES}" ] ; then
+        logmsg "${MSG}"
+        MSG="${LOGMSG}"
+    fi
+    
+    if [ "${1}" -ne 0 ] ; then 
+        FAILED="true"
+    fi
+    
+    echo "{ \"changed\": ${CHANGED},\"failed\": ${FAILED},\"msg\": \"${MSG}\" }"
+    exit ${1}
+}
+
+###############################################################################
+#
+# Function GETPARAMVALUE
+#
+# Extract value corresponding to the given tag. The input string should have
+# the form " tag=value "
+#
+# Parameters:
+# 1 - arguments file
+#
+###############################################################################
+function getParamValue() 
+{
+    local ARGS="${1}"
+    local TAG="${2}"
+    local PARAM_VALUE=""
+    
+    eval $(sed -e "s/\($TAG\)=\([a-zA-Z0-9\/\.]*\)/PARAM_VALUE='\2'/g" "$ARGS")
+    echo "$PARAM_VALUE"
+}
+
+###############################################################################
+#
+# Function PARSEPARAMS
+#
+# Extract values of input parameters from a string representing the contents
+# of the Ansible arguments file
+#
+# Parameters:
+# 1 - contents of arguments file
+#
+###############################################################################
+function parseParams()
+{
+    local ARGS="${1}"
+
+    PARAM_OPTIONS=$(getParamValue "${ARGS}" "${TAG_OPTIONS}")
+    PARAM_SRC=$(getParamValue "${ARGS}" "${TAG_SRC}")
+    PARAM_DEST=$(getParamValue "${ARGS}" "${TAG_DEST}")
+    PARAM_VERBOSE=$(getParamValue "${ARGS}" "${TAG_VERBOSE}")
+
+    # check parameter values
+    if [ "${PARAM_SRC}" = "" ] ; then
+        stop  ${ERR_PARAM} "No value found for '${TAG_SRC}'"
+    fi
+    if [ ! -d "${PARAM_SRC}" ] ; then
+        stop  ${ERR_PARAM} "Source directory '${PARAM_SRC}' does not exist"
+    fi    
+    case "${PARAM_SRC}" in
+        */) stop  ${ERR_PARAM} "Source directory '${PARAM_SRC}' contains trailing slash";;
+        *)  ;;
+    esac    
+    if [ "${PARAM_DEST}" = "" ] ; then
+        stop  ${ERR_PARAM} "No value found for '${TAG_DEST}'"
+    fi
+}
+
+###############################################################################
+#
+# Start
+#
+###############################################################################
+
+logmsg "${NAMETAG} ${VERSION}"
+parseParams "$@"
+
+RSYNC_CMD="sudo /usr/bin/rsync ${PARAM_OPTIONS} '${PARAM_SRC}' '${PARAM_DEST}'"
+logmsg "Executing: '${RSYNC_CMD}'"
+RC=$(eval "${RSYNC_CMD}")
+if [ "${RC}" -ne 0 ] ; then 
+    stop ${ERR_RSYNC} "Unable to run rsync - code ${RC}"
+fi
+CHANGED="true"
+
+# if we reached this point, we can exit with success
+stop 0 "Success."

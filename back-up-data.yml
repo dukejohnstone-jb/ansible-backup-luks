@@ -1,0 +1,92 @@
+---
+###########################################################            
+# 
+# Unlock and mount remote drives, rsync data, unmount and lock
+#
+# To run:
+#   ansible-playbook back-up-data.yml --ask-vault-pass
+#       -e source=<copy-from> -e target=<copy-to>
+#
+# "source" and "target" should point to variables in 
+# luks-disks.yml:
+#
+# disks:
+#   my_disk_1:
+#     uuid: 1234-5678-abcd
+#     password: DJRFJTT$(%TRJFJFMM  
+#
+#   my_disk_2:
+#     uuid: abcd-5678-1234
+#     password: HKHKRFJ^(^*$*#*MCN
+#
+############################################################
+- name: connect to remote machine, unlock LUKS modules and perform backup
+  hosts: <see hosts file>
+  gather_facts: False
+  
+  
+  vars_files:
+    # contains names, UUIDs, passwords for all partitions
+    - luks-disks.yml
+    
+  pre_tasks:   
+    - set_fact:        
+        source_password: "{{ disks[source].password }}"
+        target_password: "{{ disks[target].password }}"
+        source_uuid: "{{ disks[source].uuid }}"
+        target_uuid: "{{ disks[target].uuid }}"
+        # pick a writable directory. I use /media
+        source_mountpt: "/media/{{ disks[source].uuid }}"
+        target_mountpt: "/media/{{ disks[target].uuid }}"
+
+                            
+  roles:      
+    ###########################################################
+    # open
+    ###########################################################
+    - { role: luks, 
+        action: "open",
+        mountpoint: "{{ source_mountpt }}",
+        uuid: "{{ source_uuid }}",
+        password: "{{ source_password }}",
+        verbose: "true"
+      }
+      
+    - { role: luks, 
+        action: "open",
+        mountpoint: "{{ target_mountpt }}",
+        uuid: "{{ target_uuid }}",
+        password: "{{ target_password }}",
+        verbose: "true"
+      }
+          
+    ###########################################################
+    # rsync
+    ###########################################################
+    # insert as many of these as you need 
+    #- { role: rsync, 
+    #    options: "-a --delete",
+    #    src: "{{ source_mountpt }}/your-src-dir-name-here",
+    #    dest: "{{  target_mountpt }}your-target-dir-name-here",
+    #    verbose: "true"
+    #  }  
+      
+    ###########################################################            
+    # close
+    ###########################################################
+    - { role: luks, 
+        action: "close",
+        mountpoint: "{{ source_mountpt }}",
+        verbose: "true"
+      }
+      
+    - { role: luks, 
+        action: "close",
+        mountpoint: "{{ target_mountpt }}",
+        verbose: "true"
+      }      
+
+
+###########################################################            
+# end
+###########################################################

@@ -1,0 +1,494 @@
+#!/bin/bash
+#
+#  Ansible module with two functions:
+#    - Unlock a $DEVICE and mount it at $MOUNTPT 
+#    - unmount $MOUNTPT and lock $DEVICE 
+#
+#  Parameters:
+#    action: open or close
+#    verbose: true/yes; anything else is false
+#    uuid: UUID of device
+#    mountpoint: directory where the volume is to be mounted
+#    password: Password to unlock device
+#
+###############################################################################
+# Constants
+###############################################################################
+
+declare -r NAMETAG="Mod_LUKS"
+declare -r VERSION="Ver 1.0 21st March 2017"
+
+# tags for input parameters
+declare -r TAG_ACTION="action"
+declare -r TAG_MOUNTPT="mountpoint" 
+declare -r TAG_PASSWORD="password"
+declare -r TAG_UUID="uuid"
+declare -r TAG_VERBOSE="verbose"
+
+# values for the "action" parameter
+declare -r ACTION_OPEN="open"
+declare -r ACTION_CLOSE="close"
+
+# values for the "verbose" parameter
+declare -r VERBOSE_ON="true"
+declare -r VERBOSE_YES="yes"
+
+# exit codes
+declare -r ERR_PARAM=1
+declare -r ERR_UUID=2
+declare -r ERR_UNLOCK=3
+declare -r ERR_LOCK=4
+declare -r ERR_MOUNTPT=5
+declare -r ERR_MOUNT=6
+
+# Ansible status variables
+CHANGED="false"
+FAILED="false"
+
+# other
+LOGMSG=""
+
+###############################################################################
+#
+# Function LOGMSG
+#
+# Append a message to previous messages. Doesn't actually "log" to a log file - 
+# the messages will be returned to Ansible
+#
+# Parameters: 
+# 1 - message
+#
+###############################################################################
+function logmsg() 
+{
+    LOGMSG="${LOGMSG}\n${1}"
+}
+
+###############################################################################
+#
+# Function STOP
+#
+# Terminates the script and generates a message for Ansible.
+#
+# Parameters:
+#  1 - exit code
+#  2 - message
+#
+###############################################################################
+function stop()
+{
+    local MSG="${NAMETAG} : Exit code: ${1} - ${2}"
+
+    if [ "${PARAM_VERBOSE}" = "${VERBOSE_ON}" ] ||
+       [ "${PARAM_VERBOSE}" = "${VERBOSE_YES}" ] ; then
+        logmsg "${MSG}"
+        MSG="${LOGMSG}"
+    fi
+    
+    if [ "${1}" -ne 0 ] ; then 
+        FAILED="true"
+    fi
+    
+    echo "{ \"changed\": ${CHANGED},\"failed\": ${FAILED},\"msg\": \"${MSG}\" }"
+    exit ${1}
+}
+
+###############################################################################
+#
+# Function GETPARAMVALUE
+#
+# Extract value corresponding to the given tag. The input string should have
+# the form " tag=value "
+#
+# Parameters:
+# 1 - arguments file
+# 2 - tag whose value is to be extracted
+#
+###############################################################################
+function getParamValue() 
+{
+    local ARGS="${1}"
+    local TAG="${2}"
+    local PARAM_VALUE=""
+    
+    eval $(sed -e "s/\($TAG\)=\([a-zA-Z0-9\/\.]*\)/PARAM_VALUE='\2'/g" "$ARGS")
+    echo "$PARAM_VALUE"
+}
+
+###############################################################################
+#
+# Function PARSEPARAMS
+#
+# Extract values of input parameters from a string representing the contents
+# of the Ansible arguments file
+#
+# Parameters:
+# 1 - contents of arguments file
+#
+###############################################################################
+function parseParams()
+{
+    local ARGS="${1}"
+    
+    PARAM_ACTION=$(getParamValue "${ARGS}" "${TAG_ACTION}")
+    PARAM_MOUNTPT=$(getParamValue "${ARGS}" "${TAG_MOUNTPT}")
+    PARAM_PASSWORD=$(getParamValue "${ARGS}" "${TAG_PASSWORD}")
+    PARAM_UUID=$(getParamValue "${ARGS}" "${TAG_UUID}")
+    PARAM_VERBOSE=$(getParamValue "${ARGS}" "${TAG_VERBOSE}")
+
+    # check parameter values
+    if [ "${PARAM_ACTION}" = "" ] ; then
+	    stop ${ERR_PARAM} "No value found for '${TAG_ACTION}'"
+    fi
+    if [ "${PARAM_ACTION}" != "${ACTION_OPEN}" ] &&
+       [ "${PARAM_ACTION}" != "${ACTION_CLOSE}" ] ; then
+        stop ${ERR_PARAM} "Invalid value found for '${TAG_ACTION}' : '${PARAM_ACTION}'"
+    fi
+    if [ "${PARAM_MOUNTPT}" = "" ] ; then
+        stop  ${ERR_PARAM} "No value found for '${TAG_MOUNTPT}'"
+    fi
+
+    # action=open only
+    if [ "${PARAM_ACTION}" = "${ACTION_OPEN}" ] ; then
+        if [ "${PARAM_UUID}" = "" ] ; then
+	        stop  ${ERR_PARAM} "No value found for '${TAG_UUID}'"
+        fi
+        if [ "${PARAM_PASSWORD}" = "" ] ; then
+	        stop  ${ERR_PARAM} "No value found for '${TAG_PASSWORD}'"
+	    fi
+    fi
+}
+
+###############################################################################
+#
+# Function GETDEVICEBYUUID
+#
+# Using the UUID, find the device from /sbin/blkid 
+#
+# Parameters:
+# 1 - UUID of device
+#
+###############################################################################
+function getDeviceByUUID()
+{
+    local UUID="${1}"
+    local DEV=`sudo /sbin/blkid -t UUID=${UUID} -o device`
+    
+    if [ "${DEV}" = "" ] ; then
+        stop ${ERR_UUID} "Unable to find device with UUID '${UUID}'"
+    fi
+    
+    logmsg "Found device ${DEV} with UUID '${UUID}'"
+    echo "${DEV}"
+}
+
+###############################################################################
+#
+# Function GETDEVICEBYMOUNTPOINT
+#
+# Returns the device mounted at the given mountpoint
+#
+# Parameters:
+# 1 - Mountpoint
+#
+###############################################################################
+function getDeviceByMountpoint()
+{
+    local MOUNTPT="${1}"
+    local DEV=`grep ${MOUNTPT} /etc/mtab | cut -f1 -d' '`
+    
+    if [ ! "${DEV}" ] ; then
+        stop ${ERR_MOUNTPT} "Nothing found mounted at mountpoint '${MOUNTPT}'"
+    fi
+    
+    echo "${DEV}"
+}
+
+###############################################################################
+#
+# Function ISVOLUMEMOUNTED
+#
+# Returns "true" if the volume is mounted at the given mountpoint
+#
+# Parameters:
+# 1 - Volume
+# 2 - Mountpoint
+#
+###############################################################################
+function isVolumeMounted()
+{
+    local VOL="${1}"
+    local MOUNTPT="${2}"
+    local MOUNTED=`grep ${MOUNTPT} /etc/mtab | grep ${VOL}`
+    if [ "${MOUNTED}" != "" ] ; then
+        echo "true"
+    else
+        echo ""
+    fi
+}  
+    
+###############################################################################
+#
+# Function UNLOCKVOLUME
+#
+# Unlocks an encrypted volume
+#
+# Parameters:
+# 1 - Device to be unlocked
+# 2 - Volume name to be used to access unlocked device
+# 3 - Password for unlocking
+#
+###############################################################################
+function unlockVolume()
+{
+    local DEV="${1}"
+    local VOL="${2}"
+    local PASSWD="${3}"
+    
+    if [ -b "/dev/mapper/${VOL}" ] ; then
+        logmsg "Volume '${VOL}' already unlocked; skipping"
+    else
+        logmsg "Attempting to unlock volume ${VOL}"
+        echo "${PASSWD}" | sudo /sbin/cryptsetup -q -v luksOpen "${DEV}" "${VOL}"
+        local RC="$?"
+        if [ "${RC}" -ne 0 ] ; then
+            stop ${ERR_UNLOCK} "Unable to unlock volume '${VOL}' - cryptsetup returned ${RC}"
+        else
+            logmsg "Successfully unlocked volume '${VOL}'"
+            CHANGED="true"
+        fi
+    fi
+}
+
+###############################################################################
+#
+# Function LOCKVOLUME
+#
+# Locks an encrypted volume
+#
+# Parameters:
+# 1 - Volume to be locked
+#
+###############################################################################
+function lockVolume()
+{
+    local VOL="${1}"
+    
+    if [ ! -b "/dev/mapper/${VOL}" ] ; then
+        logmsg "Volume '${VOL}' already locked"
+    else
+        logmsg "Locking volume '${VOL}'"
+        sudo /sbin/cryptsetup luksClose "${VOL}"
+        local RC="$?"
+        if [ "${RC}" -ne 0 ] ; then
+            stop ${ERR_LOCK} "Unable to lock volume '${VOL}' - cryptsetup returned ${RC}"
+        else
+            logmsg "Locked volume '${VOL}'"
+            CHANGED="true"
+        fi
+    fi
+}
+
+###############################################################################
+#
+# Function MOUNTVOLUME
+#
+# Mounts an unlocked volume at the given mountpoint
+#
+# Parameters:
+# 1 - Volume
+# 2 - Mountpoint
+# 
+###############################################################################
+function mountVolume()
+{
+    local VOL="${1}"
+    local MOUNTPT="${2}"
+    local MOUNTED=$(isVolumeMounted "${VOL}" "${MOUNTPT}")
+   
+    if [ "${MOUNTED}" != "" ] ; then
+        logmsg "Volume '${VOL}' already mounted at mountpoint '${MOUNTPT}'\n${MOUNTED}\nSkipping"
+    else
+        createMountpoint "${MOUNTPT}"
+        logmsg "Mounting volume '${VOL}' at mountpoint '${MOUNTPT}'"       
+        sudo /bin/mount -v -t ext4 /dev/mapper/${VOL} "${MOUNTPT}"
+        local RC="$?"
+        if [ "${RC}" -ne 0 ] ; then
+            stop ${ERR_MOUNT} "Unable to mount volume '${VOL}' at mountpoint '${MOUNTPT}' - mount returned ${RC}"
+        else
+            logmsg "Mounted volume '${VOL}' at mountpoint '${MOUNTPT}'"
+            CHANGED="true"
+        fi
+    fi
+}
+
+###############################################################################
+#
+# Function UNMOUNTVOLUME
+#
+# Unmounts an unlocked volume
+#
+# Parameters:
+# 1 - Mountpoint
+# 2 - Volume
+#
+###############################################################################
+function unmountVolume()
+{
+    local MOUNTPT="${1}"
+    local VOL="${2}"
+    local MOUNTED=$(isVolumeMounted "${VOL}" "${MOUNTPT}")
+    
+    if [ "${MOUNTED}" = "" ] ; then
+        logmsg "Volume '${VOL}' not mounted at mountpoint '${MOUNTPT}'; skipping"
+    else
+        logmsg "Unmounting volume '${VOL}' from mountpoint ;${MOUNTPT};\n${MOUNTED}"
+        sudo /bin/umount -v "${MOUNTPT}"
+        local RC="$?"
+        if [ "${RC}" -ne 0 ] ; then	
+            logmsg "Unable to unmount from '${MOUNTPT}' - umount returned ${RC}. Attempting to lock anyway"
+        else
+            logmsg "Unmounted from mountpoint '${MOUNTPT}'"
+            CHANGED="true"
+        fi
+    fi
+}
+
+###############################################################################
+#
+# Function CREATEMOUNTPOINT
+#
+# Creates a mountpoint (empty directory)
+#
+# Parameters:
+# 1 - Mountpoint to be created
+# 
+###############################################################################
+function createMountpoint()
+{
+    local MOUNTPT="${1}"
+
+    # check that the directory doesn't exist
+    if [ -d "${MOUNTPT}" ] ; then
+        logmsg "Mountpoint '${MOUNTPT}' already exists; skipping"
+    else
+        logmsg "Creating mountpoint '${MOUNTPT}'"
+        mkdir "${MOUNTPT}"
+        local RC="$?"
+        if [ "${RC}" -ne 0 ] || [ ! -d "${MOUNTPT}" ] ; then
+            stop ${ERR_MOUNTPT} "Unable to create mountpoint '${MOUNTPT}' - mkdir returned ${RC}"
+        fi         
+        CHANGED="true"
+        logmsg "Created mountpoint '${MOUNTPT}'"
+    fi
+}
+
+###############################################################################
+#
+# Function REMOVEMOUNTPOINT
+#
+# Removes a mountpoint (empty directory)
+#
+# Parameters:
+# 1 - Mountpoint to be removed
+# 
+###############################################################################
+function removeMountpoint()
+{
+    local MOUNTPT="${1}"
+    
+    # check that the directory exists
+    if [ ! -d "${MOUNTPT}" ] ; then
+        logmsg "Mountpoint '${MOUNTPT}' does not exist"
+    else 
+        # check that the directory is empty i.e. unmounted 
+        local EMPTY=`find "${MOUNTPT}" -depth -type d -empty`
+        if [ "${EMPTY}" != "${MOUNTPT}" ]; then
+            stop ${ERR_MOUNTPT} "Unable to remove mountpoint '${MOUNTPT}' - directory not empty"
+        else
+            /bin/rmdir "${MOUNTPT}"
+            local RC="$?"
+            if [ "${RC}" -ne 0 ] ; then 
+                stop ${ERR_MOUNTPT} "Unable to remove mountpoint '${MOUNTPT}' - code ${RC}"
+            fi
+            CHANGED="true"
+        fi 
+    fi
+}
+
+###############################################################################
+#
+# Function LUKSOPEN
+#
+# Unlocks and mounts an encrypted volume
+#
+###############################################################################
+function luksOpen()
+{
+    logmsg "Retrieving device for UUID '${PARAM_UUID}'"
+    local DEVICE=$(getDeviceByUUID "${PARAM_UUID}")
+
+    # set a volume name - e.g. "sdc-crypt" for /dev/sdc
+    # $VOLUME contains only the volume name (e.g. sdc-crypt)
+    # $DEVICE contains the full path (e.g. /dev/sdc)
+    local VOLUME=${DEVICE#/dev/*}"-crypt"
+    logmsg "Unlocking device '${DEVICE}' as volume '${VOLUME}'"
+    unlockVolume "${DEVICE}" "${VOLUME}" "${PARAM_PASSWORD}"
+
+    logmsg "Attempting to mount volume '${VOLUME}' at mountpoint '${PARAM_MOUNTPT}'"
+    mountVolume "${VOLUME}" "${PARAM_MOUNTPT}"
+}
+
+###############################################################################
+#
+# Function LUKSCLOSE
+#
+# Locks and unmounts an encrypted volume
+#
+###############################################################################
+function luksClose()
+{
+    logmsg "Retrieving device mounted at '${PARAM_MOUNTPT}'"
+    local DEVICE=$(getDeviceByMountpoint "${PARAM_MOUNTPT}")
+
+    # $VOLUME contains only the volume name
+    # $DEVICE contains the full path
+    local VOLUME="${DEVICE##*/}"
+    logmsg "Unmounting volume '${VOLUME}' from mountpoint '${PARAM_MOUNTPT}'"
+    unmountVolume "${PARAM_MOUNTPT}" "${VOLUME}"
+
+    lockVolume "${VOLUME}"
+    removeMountpoint "${PARAM_MOUNTPT}"
+}
+
+###############################################################################
+#
+# Start
+#
+###############################################################################
+
+logmsg "${NAMETAG} ${VERSION}"
+parseParams "$@"
+
+# action = open
+if [ "${PARAM_ACTION}" = "${ACTION_OPEN}" ] ; then
+    luksOpen
+    if [ "$CHANGED" = "false" ] ; then 
+        MSG="Volume already unlocked and mounted. Nothing to do"
+    else
+        MSG="Volume unlocked and mounted at '${PARAM_MOUNTPT}'"
+    fi
+fi
+
+# action = close
+if [ "${PARAM_ACTION}" = "${ACTION_CLOSE}" ] ; then
+    luksClose
+    if [ "$CHANGED" = "false" ] ; then 
+        MSG="Volume was already unmounted and locked. Nothing to do"
+    else
+        MSG="Volume '${PARAM_MOUNTPT}' unmounted and locked"
+    fi
+fi
+
+# if we reached this point, we can exit with success
+stop 0 "${MSG}"
